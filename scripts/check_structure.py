@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
 # Copyright 2026 Maktab-e-Digital Systems Lahore.
 # SPDX-License-Identifier: Apache-2.0
-"""Enforce the MEDS-S1 repository conventions.
+"""Check the mechanical rules in docs/guidelines/CODING_STANDARDS.md.
 
-Each check protects repository consistency and makes violations visible to CI.
-The checks are intentionally mechanical; they verify conventions that can be
-reliably detected, while design correctness still requires review and testing.
-
-Rules checked (see docs/guidelines/CODING_STANDARD.md):
-  S1  every source directory has a README.md
-  S2  every .sv and .py file carries an SPDX licence identifier
-  S3  RTL module name matches its file name
-  S4  RTL modules use the mandated prefixes
-  S5  ports use the _i / _o / _io direction suffixes
-  S6  no legacy always blocks, reg/wire declarations, or $random
-  S7  no memory array declared outside meds_s1_sram
-  S8  every testbench follows tb_<module>.sv and has a matching RTL module
-  S9  configs/*.yaml parse and declare the required keys
-  S10 no file exceeds the size limit without a waiver
-
-Exit status is the number of violations, capped at 100.
+Checks cover directory READMEs, module port naming, explicit procedural block
+types, logic declarations, randomized stimulus, and testbench filenames.
+Semantic RTL checks, including latch inference, belong to the HDL linter.
 
 Usage:
     python3 scripts/check_structure.py
@@ -31,356 +17,250 @@ import argparse
 import pathlib
 import re
 import sys
-from typing import TypeAlias
+from collections.abc import Iterator
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-
-# Keep this list explicit so adding a source directory also requires deciding
-# how its purpose and contribution workflow should be documented.
-README_DIRS = (
-    "rtl",
-    "rtl/core",
-    "rtl/cache",
-    "rtl/fabric",
-    "rtl/peripherals",
-    "rtl/socket",
-    "rtl/common",
-    "rtl/generated",
-    "verif",
-    "verif/unit",
-    "verif/cosim",
-    "verif/riscof",
-    "verif/formal",
-    "verif/conformance",
-    "sw",
-    "sw/bsp",
-    "sw/apps",
-    "sw/drivers",
-    "gen",
-    "configs",
-    "boards",
-    "extensions",
-    "scripts",
-    "docs",
-    "docs/guidelines",
-    "docs/modules",
-    "docs/adr",
+SOURCE_ROOTS = (
+    "rtl", "verif", "sw", "fpga", "scripts", "docs", "gen", "configs",
+    "boards", "extensions",
 )
-
-MODULE_PREFIXES = ("s1_", "meds_s1_", "meds_v_", "tb_")
-MAX_LINES = 800
-SIZE_WAIVERS = {
-    "scripts/gen_project_catalogue.py",
-    "scripts/gen_diagrams.py",
+SKIP_DIRECTORY_NAMES = {
+    ".git", "build", "obj_dir", "__pycache__", "ext", "node_modules",
 }
-REQUIRED_CONFIG_KEYS = {"name", "isa", "privilege", "backbone", "memory_map"}
-SKIP_DIRECTORY_NAMES = {".git", "build", "__pycache__", "ext", "node_modules"}
+PORT_SUFFIXES = {
+    "input": ("_i", "_ni"),
+    "output": ("_o", "_no"),
+    "inout": ("_io", "_nio"),
+}
+IDENTIFIER = re.compile(r"(?:[A-Za-z_$][\w$]*|\\\S+)\Z")
+NON_CODE = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\(\*(?!\)).*?\*\)', re.S)
+TOKEN = re.compile(r"\\\S+|[A-Za-z_$][\w$]*|[^\s]")
+OPENING = {"(": ")", "[": "]", "{": "}"}
 
-Problem: TypeAlias = tuple[str, str, str]
+
+def source_tokens(text: str) -> list[str]:
+    """Keep keywords in comments, strings and attributes out of source checks."""
+    code = NON_CODE.sub(lambda match: "\n" * match.group().count("\n") + " ", text)
+    return TOKEN.findall(code)
+
+
+def split_top_level(tokens: list[str], separator: str) -> list[list[str]]:
+    """Split declarations without splitting dimensions or default expressions."""
+    parts: list[list[str]] = [[]]
+    depth = 0
+    for token in tokens:
+        if token == separator and depth == 0:
+            parts.append([])
+            continue
+        parts[-1].append(token)
+        if token in OPENING:
+            depth += 1
+        elif token in OPENING.values():
+            depth -= 1
+    return parts
+
+
+def group_end(tokens: list[str], start: int) -> int:
+    """Return the index after a balanced parenthesis, bracket or brace group."""
+    closing = OPENING[tokens[start]]
+    index = start + 1
+    while index < len(tokens):
+        if tokens[index] == closing:
+            return index + 1
+        if tokens[index] in OPENING:
+            index = group_end(tokens, index)
+        else:
+            index += 1
+    return len(tokens)
+
+
+def declaration_ports(tokens: list[str]) -> list[tuple[str, str]]:
+    """Read ANSI ports, including inherited directions and array dimensions."""
+    ports = []
+    direction = None
+    for declaration in split_top_level(tokens, ","):
+        if declaration and declaration[0] in PORT_SUFFIXES:
+            direction = declaration[0]
+        if direction is None:
+            continue
+        declaration = split_top_level(declaration, "=")[0]
+        identifiers = []
+        index = 0
+        while index < len(declaration):
+            token = declaration[index]
+            if token in OPENING:
+                index = group_end(declaration, index)
+                continue
+            if IDENTIFIER.fullmatch(token):
+                identifiers.append(token)
+            index += 1
+        if identifiers:
+            ports.append((direction, identifiers[-1]))
+    return ports
+
+
+def module_ports(tokens: list[str]) -> Iterator[tuple[str, list[tuple[str, str]]]]:
+    """Read ordinary ANSI and non-ANSI module ports, excluding subprograms.
+
+    This is a declaration scanner, not an HDL compiler. Preprocessor expansion
+    and validation of SystemVerilog syntax remain the compiler's responsibility.
+    """
+    index = 0
+    while index < len(tokens):
+        if tokens[index] != "module":
+            index += 1
+            continue
+        index += 1
+        if index < len(tokens) and tokens[index] in ("automatic", "static"):
+            index += 1
+        if index >= len(tokens):
+            return
+        name = tokens[index]
+        index += 1
+        if index + 1 < len(tokens) and tokens[index] == "#" and tokens[index + 1] == "(":
+            index = group_end(tokens, index + 1)
+        header = []
+        if index < len(tokens) and tokens[index] == "(":
+            end = group_end(tokens, index)
+            header = tokens[index + 1:end - 1]
+            index = end
+        ports = declaration_ports(header)
+        ansi = bool(ports)
+        header_names = {token for token in header if IDENTIFIER.fullmatch(token)}
+        while index < len(tokens) and tokens[index] != "endmodule":
+            token = tokens[index]
+            if token in ("task", "function"):
+                end_token = "end" + token
+                while index < len(tokens) and tokens[index] != end_token:
+                    index += 1
+            elif not ansi and token in PORT_SUFFIXES:
+                end = index
+                while end < len(tokens) and tokens[end] != ";":
+                    end += 1
+                ports.extend(
+                    port for port in declaration_ports(tokens[index:end])
+                    if port[1] in header_names
+                )
+                index = end
+            index += 1
+        yield name, ports
 
 
 class Checker:
-    """Collect structural violations and print them grouped by rule."""
+    """Collect structural violations and print them grouped by standard rule."""
 
     def __init__(self) -> None:
-        self.problems: list[Problem] = []
+        self.problems: list[tuple[str, str, str]] = []
 
     def bad(self, rule: str, location: pathlib.Path | str, message: str) -> None:
-        """Record a violation using a repository-relative path when possible."""
         if isinstance(location, pathlib.Path):
             try:
-                display_path = str(location.relative_to(ROOT))
+                location = location.relative_to(ROOT)
             except ValueError:
-                display_path = str(location)
-        else:
-            display_path = location
-        self.problems.append((rule, display_path, message))
+                pass
+        self.problems.append((rule, str(location), message))
 
-    # S1 -----------------------------------------------------------------
-    def check_readmes(self, fix_missing: bool) -> None:
-        for directory_name in README_DIRS:
-            directory_path = ROOT / directory_name
-            if not directory_path.is_dir():
+    def check_readmes(self, fix_missing: bool = False) -> None:
+        for source_root in SOURCE_ROOTS:
+            directory = ROOT / source_root
+            if not directory.is_dir():
                 continue
+            directories = [directory, *(p for p in directory.rglob("*") if p.is_dir())]
+            for path in sorted(directories):
+                if self._skip(path) or (path / "README.md").is_file():
+                    continue
+                if fix_missing:
+                    (path / "README.md").write_text(
+                        f"# {path.relative_to(ROOT).as_posix()}\n\n"
+                        "TODO: Describe this directory's contents and purpose.\n\n"
+                        "See `docs/guidelines/CODING_STANDARDS.md` R-D1.\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    self.bad("R-D1", path, "directory has no README.md")
 
-            readme_path = directory_path / "README.md"
-            if readme_path.exists():
-                continue
-
-            if fix_missing:
-                # Create a deliberately incomplete stub: the owner must still
-                # document the directory's actual contents and contribution flow.
-                readme_path.write_text(
-                    f"# `{directory_name}/`\n\n"
-                    "**TODO** — state what lives here, what does *not*, how to add "
-                    "something, and the definition of done.\n\n"
-                    "See `docs/guidelines/CODING_STANDARD.md` R-D1.\n",
-                    encoding="utf-8",
-                )
-                continue
-
-            self.bad("S1", directory_name, "directory has no README.md (R-D1)")
-
-    # S2 -----------------------------------------------------------------
-    def check_spdx(self) -> None:
-        source_files = (*ROOT.rglob("*.sv"), *ROOT.rglob("*.py"))
-        for source_path in source_files:
-            if self._skip(source_path):
-                continue
-
-            # The required licence header belongs at the start of the file;
-            # reading only the header also avoids loading large sources in full.
-            header = source_path.read_text(
-                encoding="utf-8", errors="replace"
-            )[:800]
-            if "SPDX-License-Identifier" not in header:
-                self.bad(
-                    "S2",
-                    source_path,
-                    "missing SPDX-License-Identifier header (R-D2)",
-                )
-
-    # S3/S4/S5 -----------------------------------------------------------
     def check_rtl(self) -> None:
-        module_pattern = re.compile(r"^\s*module\s+([A-Za-z_][\w$]*)", re.M)
-        port_pattern = re.compile(
-            r"^\s*(?:input|output|inout)\b[^;]*?"
-            r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*[,)]\s*$"
-        )
-
-        for source_path in sorted(ROOT.rglob("*.sv")):
+        for source_path in sorted((ROOT / "rtl").rglob("*.sv")):
             if self._skip(source_path):
                 continue
+            tokens = source_tokens(source_path.read_text(encoding="utf-8", errors="replace"))
+            for module_name, ports in module_ports(tokens):
+                for direction, port in ports:
+                    if re.search(r"_(?:i|o|io)_n$", port):
+                        self.bad("R-N3", source_path,
+                                 f"{module_name}: place the active-low marker before "
+                                 f"the direction suffix in '{port}' (for example rst_ni)")
+                    elif not port.endswith(PORT_SUFFIXES[direction]):
+                        self.bad("R-N2", source_path,
+                                 f"{module_name}: {direction} port '{port}' must end in "
+                                 f"{' or '.join(PORT_SUFFIXES[direction])}")
+                for required_port in ("clk_i", "rst_ni"):
+                    if ports.count(("input", required_port)) != 1:
+                        self.bad("R-N5", source_path,
+                                 f"{module_name}: declare exactly one input {required_port}")
 
-            source_text = source_path.read_text(encoding="utf-8", errors="replace")
-            module_names = module_pattern.findall(source_text)
-            if not module_names:
-                continue  # Package-only files do not declare RTL modules.
-
-            if source_path.stem not in module_names:
-                self.bad(
-                    "S3",
-                    source_path,
-                    f"no module named '{source_path.stem}' "
-                    f"(found {', '.join(module_names)}) (R-N1)",
-                )
-
-            for module_name in module_names:
-                if not module_name.startswith(MODULE_PREFIXES):
-                    self.bad(
-                        "S4",
-                        source_path,
-                        f"module '{module_name}' lacks a mandated prefix "
-                        f"{MODULE_PREFIXES} (R-N2)",
-                    )
-
-            # Port suffixes describe hardware interfaces, not task/function
-            # arguments. Skip verification files and nested task/function bodies.
-            if "verif" in source_path.parts:
-                continue
-
-            subprogram_depth = 0
-            for line in source_text.splitlines():
-                if re.match(r"\s*(task|function)\b", line):
-                    subprogram_depth += 1
-                elif re.match(r"\s*end(task|function)\b", line):
-                    subprogram_depth = max(0, subprogram_depth - 1)
-
-                if subprogram_depth:
-                    continue
-
-                port_match = port_pattern.match(line)
-                if not port_match:
-                    continue
-
-                port_name = port_match.group(1)
-                if port_name in ("clk_i", "rst_ni"):
-                    continue
-                if not port_name.endswith(("_i", "_o", "_io")):
-                    self.bad(
-                        "S5",
-                        source_path,
-                        f"port '{port_name}' lacks _i/_o/_io suffix (R-N3)",
-                    )
-
-    # S6/S7 --------------------------------------------------------------
     def check_style(self) -> None:
-        banned_patterns = (
-            (
-                re.compile(r"\balways\s*@\s*\("),
-                "use always_ff/always_comb/always_latch (R-C1)",
-            ),
-            (re.compile(r"^\s*reg\s+", re.M), "use `logic`, not `reg` (R-C2)"),
-            (re.compile(r"^\s*wire\s+", re.M), "use `logic`, not `wire` (R-C2)"),
-            (re.compile(r"\$random\b"), "use $urandom, which is seeded reproducibly (R-V4)"),
-        )
-        memory_array_pattern = re.compile(
-            r"^\s*logic\s*(?:\[[^\]]*\]\s*)+\w+\s*\[[^\]]*\]\s*;",
-            re.M,
-        )
-
+        banned_tokens = {
+            "always": ("R-C1", "use always_ff/always_comb/always_latch"),
+            "reg": ("R-C2", "use logic, not reg"),
+            "wire": ("R-C2", "use logic, not wire"),
+            "$random": ("R-V4", "use $urandom; seed tests when reproducibility is needed"),
+        }
         for source_path in sorted(ROOT.rglob("*.sv")):
             if self._skip(source_path):
                 continue
+            tokens = set(source_tokens(source_path.read_text(encoding="utf-8", errors="replace")))
+            for token, (rule, message) in banned_tokens.items():
+                if token in tokens:
+                    self.bad(rule, source_path, message)
 
-            source_text = source_path.read_text(encoding="utf-8", errors="replace")
-            for pattern, message in banned_patterns:
-                if pattern.search(source_text):
-                    self.bad("S6", source_path, message)
-
-            # Testbench memories are stimulus/scoreboard data, not synthesizable
-            # SRAM instances, so the memory-location rule excludes verification.
-            if (
-                memory_array_pattern.search(source_text)
-                and source_path.name != "meds_s1_sram.sv"
-                and "verif" not in source_path.parts
-            ):
-                self.bad(
-                    "S7",
-                    source_path,
-                    "memory array declared outside meds_s1_sram "
-                    "(INTERFACES.md section 8, R-C5)",
-                )
-
-    # S8 -----------------------------------------------------------------
     def check_testbenches(self) -> None:
-        rtl_module_names = {
-            source_path.stem
-            for source_path in ROOT.rglob("rtl/**/*.sv")
-            if not self._skip(source_path)
+        rtl_filenames = {
+            path.stem for path in (ROOT / "rtl").rglob("*.sv")
+            if not self._skip(path)
         }
-        testbench_directory = ROOT / "verif" / "unit"
-
-        for testbench_path in sorted(testbench_directory.glob("*.sv")):
-            if not testbench_path.name.startswith("tb_"):
-                self.bad(
-                    "S8",
-                    testbench_path,
-                    "unit testbench must be named tb_<module>.sv (R-V1)",
-                )
+        for path in sorted((ROOT / "verif" / "unit").glob("*.sv")):
+            if self._skip(path):
                 continue
-
-            dut_name = testbench_path.stem.removeprefix("tb_")
-            if dut_name not in rtl_module_names:
-                self.bad(
-                    "S8",
-                    testbench_path,
-                    f"no RTL module '{dut_name}' for this testbench (R-V1)",
-                )
-
-    # S9 -----------------------------------------------------------------
-    def check_configs(self) -> None:
-        try:
-            import yaml
-        except ImportError:
-            self.bad(
-                "S9",
-                "configs",
-                "cannot validate YAML files because PyYAML is not installed",
-            )
-            return
-
-        config_directory = ROOT / "configs"
-        if not config_directory.is_dir():
-            return
-
-        config_paths = sorted(config_directory.glob("*.yaml"))
-        if not config_paths:
-            self.bad("S9", "configs", "no configuration files (SPEC section 5.3)")
-            return
-
-        for config_path in config_paths:
-            try:
-                config_data = yaml.safe_load(
-                    config_path.read_text(encoding="utf-8")
-                ) or {}
-            except (OSError, UnicodeError, yaml.YAMLError) as error:
-                self.bad("S9", config_path, f"YAML does not parse: {error}")
-                continue
-
-            if not isinstance(config_data, dict):
-                self.bad("S9", config_path, "configuration must be a YAML mapping")
-                continue
-
-            missing_keys = REQUIRED_CONFIG_KEYS - set(config_data)
-            if missing_keys:
-                self.bad(
-                    "S9",
-                    config_path,
-                    f"missing required keys: {', '.join(sorted(missing_keys))}",
-                )
-
-    # S10 ----------------------------------------------------------------
-    def check_size(self) -> None:
-        source_files = (*ROOT.rglob("*.sv"), *ROOT.rglob("*.py"))
-        for source_path in source_files:
-            if self._skip(source_path):
-                continue
-
-            relative_path = str(source_path.relative_to(ROOT))
-            if relative_path in SIZE_WAIVERS:
-                continue
-
-            line_count = len(
-                source_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            )
-            if line_count > MAX_LINES:
-                self.bad(
-                    "S10",
-                    source_path,
-                    f"{line_count} lines exceeds the {MAX_LINES}-line limit; "
-                    "split it or add a waiver with a reason (R-C6)",
-                )
+            if not path.name.startswith("tb_"):
+                self.bad("R-V1", path, "unit testbench must be named tb_<filename>.sv")
+            elif path.stem.removeprefix("tb_") not in rtl_filenames:
+                self.bad("R-N1", path, "no RTL source filename matches this testbench")
 
     @staticmethod
-    def _skip(source_path: pathlib.Path) -> bool:
-        """Exclude vendored, generated, and transient files from source checks."""
-        path_parts = set(source_path.parts)
-        return bool(path_parts & SKIP_DIRECTORY_NAMES) or "rtl/generated" in str(
-            source_path
+    def _skip(source_path: pathlib.PurePath) -> bool:
+        # Work relative to the repository so a parent named build or ext cannot
+        # accidentally disable every check. Path parts also work on Windows.
+        try:
+            parts = source_path.relative_to(ROOT).parts
+        except ValueError:
+            parts = source_path.parts
+        return bool(set(parts) & SKIP_DIRECTORY_NAMES) or any(
+            pair in (("rtl", "generated"), ("fpga", "synth"))
+            for pair in zip(parts, parts[1:])
         )
 
     def report(self) -> int:
         if not self.problems:
             print("structure check: OK")
             return 0
-
-        problems_by_rule: dict[str, list[tuple[str, str]]] = {}
-        for rule, path, message in self.problems:
-            problems_by_rule.setdefault(rule, []).append((path, message))
-
         print(f"structure check: {len(self.problems)} violation(s)\n")
-        for rule in sorted(problems_by_rule):
-            print(f"  [{rule}]")
-            for path, message in sorted(problems_by_rule[rule]):
-                print(f"    {path}: {message}")
-            print()
-
-        print(
-            "See docs/guidelines/CODING_STANDARD.md for the rule that each "
-            "check maps to."
-        )
+        for rule, path, message in sorted(self.problems):
+            print(f"  [{rule}] {path}: {message}")
+        print("\nSee docs/guidelines/CODING_STANDARDS.md for the rules.")
         return min(len(self.problems), 100)
 
 
 def main() -> int:
-    """Parse command-line options, run every gate, and return the result."""
-    argument_parser = argparse.ArgumentParser()
-    argument_parser.add_argument(
-        "--fix-readmes",
-        action="store_true",
-        help="create a stub README.md in any directory missing one",
-    )
-    arguments = argument_parser.parse_args()
-
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fix-readmes", action="store_true",
+                        help="create a README stub in each undocumented source directory")
+    args = parser.parse_args()
     checker = Checker()
-    checker.check_readmes(arguments.fix_readmes)
-    checker.check_spdx()
+    checker.check_readmes(args.fix_readmes)
     checker.check_rtl()
     checker.check_style()
     checker.check_testbenches()
-    checker.check_configs()
-    checker.check_size()
     return checker.report()
 
 

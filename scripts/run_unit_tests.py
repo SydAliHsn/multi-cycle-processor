@@ -1,18 +1,15 @@
-# Updated Script: `run_unit_tests.py`
-
-```python
 #!/usr/bin/env python3
 # Copyright 2026 Maktab-e-Digital Systems Lahore.
 # SPDX-License-Identifier: Apache-2.0
-"""Discover, build and run every MEDS-S1 unit testbench.
+"""Discover, build and run every project unit testbench.
 
 There is no manifest to maintain: any file matching verif/unit/tb_*.sv is a
 testbench, and it is compiled against every package and module under rtl/.
 Verilator prunes what the testbench does not instantiate.
 
-A testbench passes when it exits 0 AND prints a line matching "=== PASS".
-Requiring both is deliberate: a testbench that compiles, runs and checks nothing
-exits 0 too, and that is the failure this catches.
+A testbench passes when it exits 0 AND prints "=== PASS : <n> checks ===".
+Requiring both prevents a normal simulator exit without a test summary from
+being reported as a successful test.
 
 Usage:
     python3 scripts/run_unit_tests.py                # all
@@ -34,11 +31,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 RTL = ROOT / "rtl"
 UNIT = ROOT / "verif" / "unit"
 WAIVERS = ROOT / "verif" / "verilator.vlt"
-# [R-G2] build directories correctly mapped to build/ (already conforming, no change needed)
 BUILD = ROOT / "build" / "unit"
 
-PASS_RE = re.compile(r"===\s*PASS", re.I)
-CHECKS_RE = re.compile(r"===\s*PASS\s*:\s*(\d+)\s*checks", re.I)
+CHECKS_RE = re.compile(r"[ \t]*===[ \t]+PASS[ \t]*:[ \t]*([0-9]+)[ \t]+checks[ \t]+===[ \t]*")
 
 
 def rtl_sources() -> list[pathlib.Path]:
@@ -51,7 +46,9 @@ def rtl_sources() -> list[pathlib.Path]:
 
 def run_one(tb: pathlib.Path, srcs: list[pathlib.Path], keep: bool) -> dict:
     name = tb.stem                       # tb_s1_alu
-    outdir = BUILD / name
+    outdir = (BUILD / name).resolve()
+    if outdir.parent != BUILD.resolve():
+        raise ValueError(f"test build directory is outside {BUILD}")
     if outdir.exists() and not keep:
         shutil.rmtree(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -76,25 +73,26 @@ def run_one(tb: pathlib.Path, srcs: list[pathlib.Path], keep: bool) -> dict:
     run = subprocess.run([str(exe)], capture_output=True, text=True, cwd=ROOT,
                          timeout=600)
     out = run.stdout + run.stderr
-    ok = run.returncode == 0 and bool(PASS_RE.search(out))
-    m = CHECKS_RE.search(out)
+    m = next((match for line in out.splitlines()
+              if (match := CHECKS_RE.fullmatch(line))), None)
+    ok = run.returncode == 0 and m is not None
     return dict(name=name, ok=ok, stage="run", checks=int(m.group(1)) if m else 0,
                 secs=time.time() - t0, log=out[-4000:])
 
 
 def main() -> int:
-    # [R-N4 Enforcement]: Converted non-descriptive local variable 'ap' to 'parser'
     parser = argparse.ArgumentParser()
     parser.add_argument("--tb", help="run only testbenches whose name contains this")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--keep", action="store_true", help="reuse build dirs")
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
 
     if not shutil.which("verilator"):
-        print("error: verilator not found; see docs/guidelines/ONBOARDING.md")
+        print("error: verilator not found; install Verilator and add it to PATH")
         return 2
 
-    # [R-V1 Enforcement]: Validating tb_*.sv structure mapping under verif/unit
     tbs = sorted(UNIT.glob("tb_*.sv"))
     if args.tb:
         tbs = [t for t in tbs if args.tb in t.stem]
@@ -128,4 +126,3 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-```
