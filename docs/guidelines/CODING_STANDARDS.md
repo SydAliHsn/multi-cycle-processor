@@ -105,8 +105,6 @@ Lint warnings must be reviewed rather than ignored. Intentional exceptions must 
 | ID | Rule | Enforcement |
 |---|---|---|
 | **R&#8209;D1** | Every maintained source directory must contain a `README.md` explaining its contents and purpose. | [auto] |
-| **R&#8209;D2** | Every `.sv` and `.py` file must include the project's required SPDX license header. | [auto] |
-| **R&#8209;D3** | Every RTL module must have a corresponding contract page in `docs/modules/`. | [auto] |
 | **R&#8209;D4** | Comments must explain why a design decision or operation is necessary, rather than merely restating what the code does. | |
 
 ## 6. Verification — R-V
@@ -135,7 +133,6 @@ The verification suite should cover arithmetic and logical instructions, registe
 
 | ID | Rule | Enforcement |
 |---|---|---|
-| **R&#8209;G1** | Commit subjects must follow `<area>: <imperative summary>`. The commit body should explain why the change is necessary when further context is useful. | |
 | **R&#8209;G2** | Never commit generated build output. Ensure `build/`, `*.vcd`, `obj_dir/`, and `fpga/synth/` are covered by `.gitignore`. | [auto] |
 
 ### Branching
@@ -155,16 +152,16 @@ docs/coding-standards
 
 ### Commit messages
 
-Use concise, descriptive subjects written in the imperative mood.
+Use concise, descriptive commit subjects.
 
 Examples:
 
 ```text
-rtl: Add ALU implementation
-rtl: Implement processor controller
-verif: Add register file testbench
-fix: Correct branch target calculation
-docs: Update module contracts
+Add ALU implementation
+Implement processor controller
+Add register file testbench
+Correct branch target calculation
+Update project documentation
 ```
 
 Avoid vague messages such as `changes`, `update`, or `final code`.
@@ -200,7 +197,6 @@ Describe the tests performed and their results.
 - [ ] Unit testbenches pass (`make test-unit`).
 - [ ] Unit testbenches were added or updated in `verif/unit/`.
 - [ ] Synthesis warnings were reviewed; no unintended latches were introduced.
-- [ ] Module contracts in `docs/modules/` were updated where necessary.
-- [ ] Documentation and license headers were updated where necessary.
+- [ ] Documentation was updated where necessary.
 - [ ] Framebuffer, peripheral, and assembly behaviour was tested where affected.
 ```
