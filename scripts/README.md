@@ -1,6 +1,14 @@
 # Project checks
 
-Run these commands from the repository root with Python 3.10 or newer:
+Run these commands from the repository root using `make` (requires Python 3.10 or newer):
+
+```bash
+make check       # structure + documentation
+make lint        # Verilator lint check
+make test-unit   # build and run unit testbenches
+```
+
+You can also invoke the underlying Python scripts and regression suite directly:
 
 ```text
 python scripts/check_structure.py
