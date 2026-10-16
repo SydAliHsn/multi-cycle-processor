@@ -105,7 +105,7 @@ Lint warnings must be reviewed rather than ignored. Intentional exceptions must 
 | ID | Rule | Enforcement |
 |---|---|---|
 | **R&#8209;D1** | Every maintained source directory must contain a `README.md` explaining its contents and purpose. | [auto] |
-| **R&#8209;D4** | Comments must explain why a design decision or operation is necessary, rather than merely restating what the code does. | |
+| **R&#8209;D2** | Comments must explain why a design decision or operation is necessary, rather than merely restating what the code does. | |
 
 ## 6. Verification — R-V
 
@@ -133,7 +133,7 @@ The verification suite should cover arithmetic and logical instructions, registe
 
 | ID | Rule | Enforcement |
 |---|---|---|
-| **R&#8209;G2** | Never commit generated build output. Ensure `build/`, `*.vcd`, `obj_dir/`, and `fpga/synth/` are covered by `.gitignore`. | [auto] |
+| **R&#8209;G1** | Never commit generated build output. Ensure `build/`, `*.vcd`, `obj_dir/`, and `fpga/synth/` are covered by `.gitignore`. | [auto] |
 
 ### Branching
 
@@ -142,12 +142,12 @@ Keep `main` in a working, reasonably stable state. Use descriptive branches for 
 Examples:
 
 ```text
-feature/alu-implementation
-feature/control-unit
-feature/branch-prediction
-feature/vga-controller
-fix/hazard-forwarding
-docs/coding-standards
+alu-implementation
+control-unit
+branch-prediction
+vga-controller
+hazard-forwarding
+coding-standards
 ```
 
 ### Commit messages
